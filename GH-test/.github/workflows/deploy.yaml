@@ -1,0 +1,70 @@
+on:
+  push:
+    branches:
+      # - "main" Commented out for the sake of not running a GitHub action
+      - "develop"
+
+env:
+  # Examples indicated in comments
+  FLOWNAME: {flow_name} 
+  DEPLOYMENTYAML: deploy.yaml # This is the name of the file that the deployment configurations will be written to
+  DEPLOYMENTNAME: {name_of_deployment} # daily_ingestion, 15_min_interval
+  ECRNAME: 727888219528.dkr.ecr.us-east-2.amazonaws.com/{name of ecr repo}
+  INFRA: {infrastructure_block_name} # kubernetes-job/example-flow
+  SCHEDULE: {your_schedule} # cron "0 0 * * *"
+  STORAGE: {storage_name} # s3/my_flow_storage
+  PREFECT_API_KEY: ${{ secrets.PREFECT_API_KEY }} 
+  PREFECT_API_URL: ${{ secrets.PREFECT_API_URL }} # https://api.prefect.cloud/api/accounts/[ACCOUNT-ID]/workspaces/[WORKSPACE-ID]
+  FILESYSTEM_EXTRAS: s3fs
+
+jobs:
+  build:
+    name: deploy flow
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: divideprojects/poetry-export-requirements-action@v1
+        with:
+          without-hashes: true
+          outfile-name: requirements.txt
+      # Extract the current branch name to reference Blocks corresponding to this environment
+      - name: Extract branch name
+        shell: bash
+        run: echo "##[set-output name=branch;]$(echo ${GITHUB_REF#refs/heads/})"
+        id: extract_branch
+      - name: Set up Python 3.9
+        uses: actions/setup-python@v4
+        with:
+          python-version: 3.9
+      - name: Python dependencies
+        run: |
+          pip install -U wheel pip $FILESYSTEM_EXTRAS
+          pip install -r requirements.txt
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - uses: int128/create-ecr-repository-action@v1
+        id: ecr
+        with:
+          repository: ${{ env.ECRNAME }}
+      - name: Push to container registry
+        run: |
+          docker build . --tag ${{ env.ECRNAME }}:prefect-orion -f ./Dockerfile
+          docker push ${{ env.ECRNAME }}:prefect-orion
+      # Branch based logic to submit flows to different workqueues
+      - if: github.ref == 'refs/heads/main'
+        name: Build and apply Prefect deployment
+        run: prefect deployment build ./flow/flow.py:$FLOWNAME -n $DEPLOYMENT_NAME -sb $STORAGE -ib $INFRA -o $DEPLOYMENTYAML -q prod --apply
+      - if: github.ref == 'refs/heads/dev'
+        name: Build and apply Prefect deployment
+        run: prefect deployment build ./flow/flow.py:$FLOWNAME -n $DEPLOYMENT_NAME-sb $STORAGE -ib $INFRA  -o $DEPLOYMENTYAML -q dev --apply
+      # In order to attach schedules please attached a flag- cron, interval or rrule
+      # Example- prefect deployment build demo.py:pipeline -n etl --cron "0 0 * * *"
