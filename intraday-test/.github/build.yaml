@@ -1,0 +1,79 @@
+on:
+  push:
+    branches:
+      - "main"
+      - "develop"
+
+env:
+  # Examples indicated in comments
+  FILEPATH: intraday_flow.py:run_intraday_update
+  ECRNAME: tastytrade-intraday
+  INFRA: kubernetes-job/tastytrade-intraday-kubernetes # kubernetes-job/example-flow
+  STORAGE: s3/tastytrade-intraday-storage # s3/my_flow_storage
+  FILESYSTEM_EXTRAS: s3fs
+
+jobs:
+  build:
+    name: deploy flow
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - name: 15_min_interval # daily_ingestion, 15_min_interval
+            schedule: --cron "*/15 * * * 1-5"
+            # params: {your_params} # --params='{"a":1, "b": "one"}'
+          # - name: {name_of_deployment} SECOND DEPLOYMENT
+          #   schedule: {schedule}
+          #   params:
+
+    steps:
+      - uses: actions/checkout@v3
+
+      # Extract the current branch name to reference Blocks corresponding to this environment
+      - name: Extract branch name
+        shell: bash
+        run: echo "##[set-output name=branch;]$(echo ${GITHUB_REF#refs/heads/})"
+        id: extract_branch
+
+      - name: Set up Python 3.7
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.7"
+
+      - name: Python dependencies
+        run: |
+          pip install -U wheel pip $FILESYSTEM_EXTRAS
+          pip install -r requirements.txt
+      - name: Prefect Cloud login
+        run: |
+          prefect config set PREFECT_API_KEY=${{ secrets.PREFECT_API_KEY }}
+          prefect config set PREFECT_API_URL=${{ secrets.PREFECT_API_URL }}
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - uses: int128/create-ecr-repository-action@v1
+        id: ecr
+        with:
+          repository: 727888219528.dkr.ecr.us-east-2.amazonaws.com/${{ env.ECRNAME }}
+
+      - name: Push to container registry
+        run: |
+          docker build . -t ${{ env.ECRNAME }} -f ./Dockerfile
+          docker tag ${{ env.ECRNAME }}:latest 727888219528.dkr.ecr.us-east-2.amazonaws.com/${{ env.ECRNAME }}:latest
+          docker push 727888219528.dkr.ecr.us-east-2.amazonaws.com/${{ env.ECRNAME }}:latest
+      # Branch based logic to submit flows to different workqueues
+      - if: github.ref == 'refs/heads/main'
+        name: Build and apply Prefect deployment
+        run: prefect deployment build $FILEPATH -n ${{ matrix.name }} ${{ matrix.schedule }} ${{ matrix.params }} -sb $STORAGE -ib $INFRA -p prod -q prod -t prod --apply
+
+      - if: github.ref != 'refs/heads/main'
+        name: Build and apply Prefect deployment
+        run: prefect deployment build $FILEPATH -n ${{ matrix.name }} ${{ matrix.params }} -sb $STORAGE -ib $INFRA -q dev -t dev --apply
