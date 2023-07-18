@@ -1,0 +1,14 @@
+[tool.poetry]
+name = "test"
+version = "1.1.0"
+description = ""
+authors = ["Bada-S <jamessopkin@gmail.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = ">=3.8"
+prefect = "^2.10.21"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
